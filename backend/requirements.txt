@@ -1,0 +1,6 @@
+Flask
+flask-cors
+numpy
+face-recognition
+opencv-contrib-python
+bcrypt
