@@ -3,10 +3,11 @@ import bcrypt
 import os
 import pickle
 import cv2
+import datetime
 
 DATA_FILE = "known_faces/encodings.pkl"
 MAX_FAILED_ATTEMPTS = 3
-
+LOCK_DURATION_MINUTES = 5
 os.makedirs("known_faces", exist_ok=True)
 
 
@@ -52,16 +53,32 @@ def register_face(email, password, rgb_image):
 
     known_data = load_encodings()
 
+    # ❗ Check if email already exists
     if email in known_data:
         return False, "User already registered", None
 
+    new_encoding = encodings[0]
+
+    # 🔴 NEW LOGIC: Check if face already registered
+    for existing_email, user_data in known_data.items():
+        existing_encoding = user_data["encoding"]
+
+        match = face_recognition.compare_faces(
+            [existing_encoding], new_encoding, tolerance=0.5
+        )
+
+        if match[0]:
+            return False, f"This face is already registered with another account ({existing_email})", None
+
+    # If no duplicate face found → continue registration
     hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
 
     known_data[email] = {
         "password": hashed_password,
-        "encoding": encodings[0],
+        "encoding": new_encoding,
         "failed_attempts": 0,
-        "locked": False
+        "locked": False,
+        "lock_time": None
     }
 
     save_encodings(known_data)
@@ -91,30 +108,52 @@ def verify_face(email, password, rgb_image):
 
     user = known_data[email]
 
-    if user["locked"]:
-        return False, "Account is locked", None
+    # 🔒 Lock Check
+    if user.get("locked", False):
+        lock_time = user.get("lock_time")
 
-    # Check password
+        if lock_time:
+            elapsed_time = datetime.datetime.utcnow() - lock_time
+
+            if elapsed_time.total_seconds() >= LOCK_DURATION_MINUTES * 60:
+                user["locked"] = False
+                user["failed_attempts"] = 0
+                user["lock_time"] = None
+                save_encodings(known_data)
+            else:
+                remaining_seconds = LOCK_DURATION_MINUTES * 60 - elapsed_time.total_seconds()
+                remaining_minutes = int(remaining_seconds // 60) + 1
+                return False, f"Account locked. Try again in {remaining_minutes} minute(s)", None
+        else:
+            return False, "Account is locked", None
+
+    # 🔑 PASSWORD CHECK (VERY IMPORTANT)
     if not bcrypt.checkpw(password.encode("utf-8"), user["password"]):
         user["failed_attempts"] += 1
+
         if user["failed_attempts"] >= MAX_FAILED_ATTEMPTS:
             user["locked"] = True
+            user["lock_time"] = datetime.datetime.utcnow()
+
         save_encodings(known_data)
         return False, "Incorrect password", None
 
-    # Check face match
+    # 👤 FACE CHECK
     match = face_recognition.compare_faces(
         [user["encoding"]], encodings[0], tolerance=0.5
     )
 
     if not match[0]:
         user["failed_attempts"] += 1
+
         if user["failed_attempts"] >= MAX_FAILED_ATTEMPTS:
             user["locked"] = True
+            user["lock_time"] = datetime.datetime.utcnow()
+
         save_encodings(known_data)
         return False, "Face not matched", None
 
-    # Successful login
+    # ✅ SUCCESS
     user["failed_attempts"] = 0
     save_encodings(known_data)
 
